@@ -1,6 +1,7 @@
 class rsync::params {
 
   $package_name='rsync'
+  $rsyncman_dependencies = [ 'python-psutil' ]
 
   case $::osfamily
   {
@@ -22,7 +23,7 @@ class rsync::params {
         {
           case $::operatingsystemrelease
           {
-            /^14.*$/:
+            /^1[468].*$/:
             {
             }
             default: { fail("Unsupported Ubuntu version! - ${::operatingsystemrelease}")  }
