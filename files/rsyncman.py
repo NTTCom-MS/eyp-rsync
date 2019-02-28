@@ -17,14 +17,17 @@ from os import access, R_OK
 from email.MIMEMultipart import MIMEMultipart
 from email.MIMEText import MIMEText
 
-error_count=0
+error_count = 0
+execute_rsync = True
 
 def help():
-    print 'Usage: '+sys.argv[0]+' [-c <config file>] [-b]'
+    print 'Usage: '+sys.argv[0]+' [-c <config file>] [-b] [-d] [-S]'
     print ''
-    print '-h,--help print this message'
-    print '-c,--config config file'
-    print '-b,--syncback sync from destination to origin'
+    print '-h,--help: print this message'
+    print '-c,--config: config file'
+    print '-b,--syncback: sync from destination to origin'
+    print '-d,--dryrun: dry run - just simulate execution'
+    print '-S,--canarystring: canary string'
     print ''
 
 def sendReportEmail(to_addr, id_host):
@@ -32,24 +35,29 @@ def sendReportEmail(to_addr, id_host):
     global logFile
 
     from_addr=getpass.getuser()+'@'+socket.gethostname()
+    if execute_rsync:
+        msg = MIMEMultipart()
+        msg['From'] = from_addr
+        msg['To'] = to_addr
+        if error_count > 0:
+            msg['Subject'] = id_host+"-RSYNCMAN-ERROR"
+        else:
+            msg['Subject'] = id_host+"-RSYNCMAN-OK"
 
-    msg = MIMEMultipart()
-    msg['From'] = from_addr
-    msg['To'] = to_addr
-    if error_count > 0:
-        msg['Subject'] = id_host+"-RSYNCMAN-ERROR"
+        body = "please check "+logFile+" on "+socket.gethostname()
+        msg.attach(MIMEText(body, 'plain'))
+
+        server = smtplib.SMTP('localhost')
+        text = msg.as_string()
+        server.sendmail(from_addr, to_addr, text)
+        server.quit()
+
+        logging.info("sent report to "+to_addr)
     else:
-        msg['Subject'] = id_host+"-RSYNCMAN-OK"
-
-    body = "please check "+logFile+" on "+socket.gethostname()
-    msg.attach(MIMEText(body, 'plain'))
-
-    server = smtplib.SMTP('localhost')
-    text = msg.as_string()
-    server.sendmail(from_addr, to_addr, text)
-    server.quit()
-
-    logging.info("sent report to "+to_addr)
+        if error_count > 0:
+            logging.info("DRY RUN: sending ERROR report to: "+to_addr+" from: "+from_addr)
+        else:
+            logging.info("DRY RUN: sending OK report to "+to_addr+" from: "+from_addr)
 
 # thank god for stackoverflow - https://stackoverflow.com/questions/25283882/determining-the-filesystem-type-from-a-path-in-python
 def get_fs_type(path):
@@ -70,6 +78,10 @@ def get_fs_type(path):
 
 def get_remote_fs_type(remote, path):
     global error_count
+
+    if not remote:
+        return get_fs_type(path)[0]
+
     #stat -f -c %T .
     command='ssh '+remote+' stat -f -c %T '+path+' 2>/dev/null'
     process = Popen(command,stderr=PIPE,stdout=PIPE,shell=True)
@@ -82,64 +94,76 @@ def get_remote_fs_type(remote, path):
         return data.splitlines()[0]
 
 
-def runJob(ionice,delete,exclude,rsyncpath,path,remote,remotepath,checkfile,expected_fs,expected_remote_fs,syncback):
+def runJob(ionice,delete,exclude,rsyncpath,path,remote,remotepath,checkfile,expected_fs,expected_remote_fs,syncback,canaryfile,canary_string):
     global error_count
     if syncback:
         basename_path=os.path.basename(path)
         dirname_path=os.path.dirname(path)
-        command=ionice+'rsync -v -a -H -x --numeric-ids '+delete+exclude+rsyncpath+' '+remote+':'+remotepath+'/'+basename_path+' '+dirname_path+' 2>&1'
+        command=ionice+'rsync -v -a -H -x --numeric-ids '+delete+exclude+rsyncpath+' '+remote+remotepath+'/'+basename_path+' '+dirname_path+' 2>&1'
     else:
-        command=ionice+'rsync -v -a -H -x --numeric-ids '+delete+exclude+rsyncpath+' '+path+' '+remote+':'+remotepath+' 2>&1'
-    if os.path.exists(checkfile):
-        logging.info("checkfile found: "+checkfile)
+        command=ionice+'rsync -v -a -H -x --numeric-ids '+delete+exclude+rsyncpath+' '+path+' '+remote+remotepath+' 2>&1'
+    if execute_rsync:
+        if canaryfile:
+            canaryfh = open(canaryfile,"w+")
+            if canary_string:
+                canaryfh.write(canary_string+" - ")
+            canaryfh.write(datetime.datetime.fromtimestamp(ts).strftime('%Y%m%d-%H%M%S')+"\n")
+            canaryfh.close()
+        if os.path.exists(checkfile):
+            logging.info("checkfile found: "+checkfile)
 
-        fs_type = get_fs_type(path)[0]
-        if expected_fs and expected_fs != fs_type:
-            logging.error("ABORTING "+path+": fs type does not match expected fs - found: "+fs_type+" expected: "+expected_fs)
-            error_count=error_count+1
-            return
+            fs_type = get_fs_type(path)[0]
+            logging.debug("For: "+path+" found fs type: "+fs_type)
+            if expected_fs and expected_fs != fs_type:
+                logging.error("ABORTING "+path+": fs type does not match expected fs - found: "+fs_type+" expected: "+expected_fs)
+                error_count=error_count+1
+                return
 
-        remote_fs_type = get_remote_fs_type(remote, remotepath)
-        if expected_remote_fs and expected_remote_fs != remote_fs_type:
-            logging.error("ABORTING "+remote+':'+remotepath+": fs type does not match expected fs - found: "+remote_fs_type+" expected: "+expected_remote_fs)
-            error_count=error_count+1
-            return
+            remote_fs_type = get_remote_fs_type(remote, remotepath)
+            logging.debug("For: "+remote+remotepath+": found fs type: "+remote_fs_type)
+            if expected_remote_fs and expected_remote_fs != remote_fs_type:
+                logging.error("ABORTING "+remote+remotepath+": fs type does not match expected fs - found: "+remote_fs_type+" expected: "+expected_remote_fs)
+                error_count=error_count+1
+                return
 
-        logging.debug("RSYNC command: "+command)
-        process = Popen(command,stderr=PIPE,stdout=PIPE,shell=True)
-        data = process.communicate()[0]
+            logging.debug("RSYNC command: "+command)
+            process = Popen(command,stderr=PIPE,stdout=PIPE,shell=True)
+            data = process.communicate()[0]
 
-        for line in data.splitlines():
-            logging.info("RSYNC: "+line)
+            for line in data.splitlines():
+                logging.info("RSYNC: "+line)
 
-        if process.returncode!=0:
-            #https://git.samba.org/?p=rsync.git;a=blob_plain;f=support/rsync-no-vanished;hb=HEAD
-            if process.returncode==24:
-                regex = re.compile(r'^(file has vanished: |rsync warning: some files vanished before they could be transferred)', re.MULTILINE)
-                matches = [m.groups() for m in regex.finditer(data)]
+            if process.returncode!=0:
+                # https://git.samba.org/?p=rsync.git;a=blob_plain;f=support/rsync-no-vanished;hb=HEAD
+                if process.returncode==24:
+                    regex = re.compile(r'^(file has vanished: |rsync warning: some files vanished before they could be transferred)', re.MULTILINE)
+                    matches = [m.groups() for m in regex.finditer(data)]
 
-                if len(matches) > 0:
-                    logging.info(path+" competed successfully")
+                    if len(matches) > 0:
+                        logging.info(path+" competed successfully")
+                    else:
+                        logging.error("ERROR found running job for "+path)
+                        error_count=error_count+1
                 else:
                     logging.error("ERROR found running job for "+path)
                     error_count=error_count+1
             else:
-                logging.error("ERROR found running job for "+path)
-                error_count=error_count+1
+                logging.info(path+" competed successfully")
         else:
-            logging.info(path+" competed successfully")
+            logging.error("ABORTING "+path+": check file does NOT exists: "+checkfile)
+            error_count=error_count+1
     else:
-        logging.error("ABORTING "+path+": check file does NOT exists: "+checkfile)
-        error_count=error_count+1
+        logging.info("DRY RUN: "+command)
 
 try:
-    opts, args = getopt.getopt(sys.argv[1:], "hc:b", ["--help", "--config", "--syncback"])
+    opts, args = getopt.getopt(sys.argv[1:], "hc:bdS:", ["--help", "--config", "--syncback", "--dryrun", "--canarystring"])
 except getopt.GetoptError, err:
     help()
     sys.exit(3)
 
 config_file = './rsyncman.config'
 syncback = False
+canary_string = ''
 
 for opt, value in opts:
     if opt in ("-h", "--help"):
@@ -149,6 +173,10 @@ for opt, value in opts:
         config_file = value
     elif opt in ("-b", "--syncback"):
         syncback = True
+    elif opt in ("-d", "--dryrun"):
+        execute_rsync = False
+    elif opt in ("-S", "--canarystring"):
+        canary_string = value
     else:
         assert False, "unhandled option"
         help()
@@ -176,7 +204,7 @@ except Exception, e:
     sys.exit(1)
 
 try:
-    logdir=config.get('rsyncman', 'logdir').strip('"')
+    logdir=config.get('rsyncman', 'logdir').strip('"').strip("'").strip()
 except:
     logdir=os.path.dirname(os.path.abspath(config_file))
 
@@ -198,12 +226,12 @@ rootLogger.addHandler(fileHandler)
 rootLogger.setLevel(0)
 
 try:
-    to_addr=config.get('rsyncman', 'to').strip('"')
+    to_addr=config.get('rsyncman', 'to').strip('"').strip("'").strip()
 except:
     to_addr=''
 
 try:
-    id_host=config.get('rsyncman', 'host-id').strip('"')
+    id_host=config.get('rsyncman', 'host-id').strip('"').strip("'").strip()
 except:
     id_host=socket.gethostname()
 
@@ -211,28 +239,33 @@ if len(config.sections()) > 0:
     for path in config.sections():
         if path != "rsyncman":
             try:
-                ionice='ionice '+config.get(path, 'ionice').strip('"')+' '
+                ionice='ionice '+config.get(path, 'ionice').strip('"').strip("'").strip()+' '
             except:
                 ionice=''
+
             try:
-                expected_fs=config.get(path, 'expected-fs').strip('"')
+                expected_fs=config.get(path, 'expected-fs').strip('"').strip("'").strip()
             except:
                 expected_fs=''
+
             try:
-                expected_remote_fs=config.get(path, 'expected-remote-fs').strip('"')
+                expected_remote_fs=config.get(path, 'expected-remote-fs').strip('"').strip("'").strip()
             except:
                 expected_remote_fs=''
+
             try:
-                rsyncpath='--rsync-path="'+config.get(path, 'rsync-path').strip('"')+'"'
+                rsyncpath='--rsync-path="'+config.get(path, 'rsync-path').strip('"').strip("'").strip()+'"'
             except:
                 rsyncpath=''
+
             try:
-                if os.path.isabs(config.get(path, 'check-file').strip('"')):
-                    checkfile=config.get(path, 'check-file').strip('"')
+                if os.path.isabs(config.get(path, 'check-file').strip('"').strip("'").strip()):
+                    checkfile=config.get(path, 'check-file').strip('"').strip("'").strip()
                 else:
-                    checkfile=path+'/'+config.get(path, 'check-file').strip('"')
+                    checkfile=path+'/'+config.get(path, 'check-file').strip('"').strip("'").strip()
             except:
                 checkfile=path
+
             try:
                 if config.getboolean(path, 'delete'):
                     delete='--delete'
@@ -240,6 +273,7 @@ if len(config.sections()) > 0:
                     delete=''
             except:
                 delete=''
+
             try:
                 exclude_config_get = config.get(path,'exclude')
                 try:
@@ -252,18 +286,36 @@ if len(config.sections()) > 0:
                     continue
             except:
                 exclude=' '
+
             try:
-                remotepath=config.get(path, 'remote-path').strip('"')
+                remotepath=config.get(path, 'remote-path').strip('"').strip("'").strip()
             except:
                 remotepath=os.path.dirname(path)
-            try:
-                remote=config.get(path, 'remote').strip('"')
 
+            try:
+                remote=config.get(path, 'remote').strip('"').strip("'").strip()
+                if remote:
+                    remote=remote+":"
             except Exception, e:
                 logging.error("remote is mandatory, aborting rsync for "+path+" - "+str(e))
                 error_count=error_count+1
                 continue
-            runJob(ionice,delete,exclude,rsyncpath,path,remote,remotepath,checkfile,expected_fs,expected_remote_fs,syncback)
+
+            try:
+                if os.path.isabs(config.get(path, 'canary-file').strip('"').strip("'").strip()):
+                    logging.error(path+": canary file cannot be an absolute path")
+                    error_count=error_count+1
+                    continue
+                else:
+                    if syncback:
+                        canaryfile=remotepath+'/'+config.get(path, 'canary-file').strip('"').strip("'").strip()
+                    else:
+                        canaryfile=path+'/'+config.get(path, 'canary-file').strip('"').strip("'").strip()
+                    logging.debug("canary file: "+canaryfile)
+            except:
+                canaryfile=''
+
+            runJob(ionice,delete,exclude,rsyncpath,path,remote,remotepath,checkfile,expected_fs,expected_remote_fs,syncback,canaryfile,canary_string)
 
     if error_count >0:
         logging.error("ERRORS FOUND: "+str(error_count))

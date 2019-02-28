@@ -66,8 +66,17 @@ rsync::manager::job { 'demo':
 
 ## Usage
 
-Put the classes, types, and resources for customizing, configuring, and doing
-the fancy stuff with your module here.
+### rsyncman usage
+
+```
+Usage: rsyncman.py [-c <config file>] [-b]
+
+-h,--help: print this message
+-c,--config: config file
+-b,--syncback: sync from destination to origin
+-d,--dryrun: dry run - just simulate execution
+-S,--canarystring: canary string
+```
 
 ## Reference
 
@@ -98,6 +107,56 @@ the fancy stuff with your module here.
 * **chmod**:           = undef,
 
 ### rsync::manager
+
+Default configuation file for rsyncman is expected to be ./rsyncman.config, but can be used a different file using the -c option
+
+#### config options
+
+Configuration file will habe a global config section (rsyncman) and as many path as needed
+
+##### rsyncman section
+
+Global config section
+
+* logdir
+* to
+* host-id
+
+##### job section
+
+Job specific options (can be configured more than one job) Section name is the local path
+
+* ionice
+* rsync-path
+* exclude
+* delete
+* remote
+* remote-path
+* check-file
+* canary-file
+* expected-fs
+* expected-remote-fs
+
+##### example config file
+
+```
+[rsyncman]
+to=demo@example.com
+host-id=DEMOHOST1234
+logdir=/var/log/rsyncman.log
+
+[/test_rsync]
+ionice="-c2 -n2"
+rsync-path="sudo rsync"
+exclude = [ "exclude1","exclude2" ]
+delete = false
+remote="jprats@127.0.0.1"
+remote-path="/test_rsync"
+check-file=is.mounted
+expected-fs=nfs
+expected-remote-fs=nfs
+```
+
 
 #### rsync::manager::schedule
 
